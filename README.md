@@ -1,8 +1,8 @@
 # The Vibe Companion - Deployment Guide with Tailscale
 
-> **Claude Code Web Interface** -- Deploy, secure, and manage Companion behind Tailscale on Fedora Linux.
+> **Claude Code & Codex CLI Web Interface** -- Deploy, secure, and manage Companion behind Tailscale on Fedora Linux.
 >
-> Written: 2026-02-10 | OS: Fedora 43 | Companion: latest (via bunx) | Tailscale: 1.92.5
+> Written: 2026-02-10 | Updated: 2026-02-11 | OS: Fedora 43 | Companion: v0.15.0 (via bunx) | Tailscale: 1.92.5
 
 ---
 
@@ -34,7 +34,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HOME=/home/YOUR_USER
-Environment=PATH=/home/YOUR_USER/.bun/bin:/home/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/home/YOUR_USER/.npm-global/bin:/home/YOUR_USER/.bun/bin:/home/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=BUN_INSTALL=/home/YOUR_USER/.bun
 WorkingDirectory=/home/YOUR_USER
 ExecStart=/home/YOUR_USER/.bun/bin/bunx the-vibe-companion
@@ -429,7 +429,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HOME=/home/YOUR_USER
-Environment=PATH=/home/YOUR_USER/.bun/bin:/home/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/home/YOUR_USER/.npm-global/bin:/home/YOUR_USER/.bun/bin:/home/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=BUN_INSTALL=/home/YOUR_USER/.bun
 WorkingDirectory=/home/YOUR_USER
 ExecStart=/home/YOUR_USER/.bun/bin/bunx the-vibe-companion
@@ -705,133 +705,292 @@ sudo iptables -I DOCKER-USER -p tcp --dport 3456 -j DROP
 
 ## 9. Troubleshooting
 
+> **Agent-Friendly Format**: Each issue follows `SYMPTOM → DIAGNOSE → FIX → VERIFY` pattern.
+> Copy-paste the diagnostic commands directly. All commands are non-destructive.
+
 ### 9.1 Port 443 Conflict with Traefik/nginx
 
 **Symptom**: `tailscale serve --bg --https 443 ...` fails or Traefik stops responding.
 
-**Cause**: Both Traefik and Tailscale try to bind port 443. Tailscale serve binds only on the Tailscale IP, but if Traefik uses `0.0.0.0:443`, there is a conflict.
-
-**Solution**: Use a non-standard HTTPS port:
-
+**Diagnose**:
 ```bash
+# Check what's using port 443
+ss -tlnp | grep ':443'
+# Check Tailscale serve status
+tailscale serve status
+```
+
+**Fix**:
+```bash
+# Use non-standard HTTPS port (avoids conflict)
 tailscale serve --bg --https=8443 3456
 ```
 
-Tailscale will bind `<your-tailscale-ip>:8443` (Tailscale IPv4) and `[<your-tailscale-ipv6>]:8443` (Tailscale IPv6), which do not conflict with Traefik's `0.0.0.0:443`.
+**Verify**:
+```bash
+ss -tlnp | grep ':8443'
+curl -k https://$(tailscale status --self --json | jq -r '.Self.DNSName' | sed 's/\.$//')::8443 2>/dev/null | head -5
+```
 
-### 9.2 Tailscale Serve Not Enabled / HTTPS Certs Not Working
+### 9.2 Tailscale Serve / HTTPS Certs Not Working
 
 **Symptom**: `tailscale serve` returns an error about HTTPS certificates.
 
-**Solution**:
+**Diagnose**:
+```bash
+tailscale serve status
+tailscale status --self
+```
 
-1. Verify HTTPS is enabled: Go to [Tailscale Admin > DNS](https://login.tailscale.com/admin/dns) and enable "HTTPS Certificates"
-2. Verify MagicDNS is enabled (required for HTTPS)
-3. Restart Tailscale: `sudo systemctl restart tailscaled`
+**Fix**:
+1. Go to [Tailscale Admin > DNS](https://login.tailscale.com/admin/dns) → enable "HTTPS Certificates" + MagicDNS
+2. Then:
+```bash
+sudo systemctl restart tailscaled
+tailscale serve --bg --https=8443 3456
+```
+
+**Verify**:
+```bash
+tailscale cert $(tailscale status --self --json | jq -r '.Self.DNSName' | sed 's/\.$//')
+```
 
 ### 9.3 WebSocket Connection Failures
 
-**Symptom**: Browser loads the UI but sessions do not start, or sessions disconnect immediately.
+**Symptom**: Browser loads the UI but sessions do not start or disconnect immediately.
 
-**Diagnosis**:
-
+**Diagnose**:
 ```bash
-# Check if Companion is running
-systemctl --user status vibe-companion.service
+# 1. Is the service running?
+systemctl --user status vibe-companion.service --no-pager | head -10
 
-# Check if port 3456 is listening
+# 2. Is port 3456 listening?
 ss -tlnp | grep 3456
 
-# Check logs for errors
-journalctl --user -u vibe-companion.service -n 50
+# 3. Recent errors in logs?
+journalctl --user -u vibe-companion.service -n 30 --no-pager | grep -iE "error|fail|crash|panic"
 
-# Test WebSocket directly
-curl -i -N \
-  -H "Connection: Upgrade" \
-  -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Version: 13" \
-  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  http://127.0.0.1:3456/ws/browser/test
+# 4. Test HTTP endpoint
+curl -s http://localhost:3456/api/backends
 ```
 
-**Common causes**:
+**Fix** (depends on diagnosis):
+```bash
+# Service not running → restart it
+systemctl --user restart vibe-companion.service
 
-- Companion process crashed (check `systemctl --user status`)
-- Claude CLI not found in PATH (check the `Environment=PATH=...` in the service file)
-- Claude CLI not authenticated (run `claude auth login` as the service user)
+# Claude CLI not found → check PATH in service
+grep "PATH=" ~/.config/systemd/user/vibe-companion.service
+
+# Claude CLI not authenticated → login
+claude auth login
+```
+
+**Verify**:
+```bash
+curl -s http://localhost:3456/api/backends | python3 -m json.tool
+# Expected: both claude and codex backends listed
+```
 
 ### 9.4 "bun: command not found" in systemd
 
 **Symptom**: Service fails to start with "bun not found" or "bunx not found".
 
-**Cause**: systemd user services do not inherit your shell's PATH.
+**Diagnose**:
+```bash
+# Check service logs
+journalctl --user -u vibe-companion.service -n 10 --no-pager
 
-**Solution**: The service file explicitly sets PATH:
+# Check if bun exists
+ls -la ~/.bun/bin/bun ~/.bun/bin/bunx 2>&1
 
-```ini
-Environment=PATH=/home/YOUR_USER/.bun/bin:/home/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Compare shell PATH vs service PATH
+echo "Shell: $(which bun 2>/dev/null || echo 'not found')"
+grep "PATH=" ~/.config/systemd/user/vibe-companion.service
 ```
 
-Verify the bun binary exists at the specified path:
-
+**Fix**:
 ```bash
-ls -la /home/YOUR_USER/.bun/bin/bun
-ls -la /home/YOUR_USER/.bun/bin/bunx
+# Ensure service PATH includes all needed directories
+# Edit ~/.config/systemd/user/vibe-companion.service:
+# Environment=PATH=/home/YOUR_USER/.npm-global/bin:/home/YOUR_USER/.bun/bin:/home/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+systemctl --user daemon-reload
+systemctl --user restart vibe-companion.service
+```
+
+**Verify**:
+```bash
+systemctl --user status vibe-companion.service --no-pager | head -5
+# Expected: Active: active (running)
 ```
 
 ### 9.5 Service Starts But No Sessions Can Be Created
 
 **Symptom**: Companion web UI loads, but clicking "New Session" fails.
 
-**Diagnosis**:
-
+**Diagnose**:
 ```bash
-# Check if claude CLI is accessible
-/home/YOUR_USER/.local/bin/claude --version
+# 1. Check backends availability
+curl -s http://localhost:3456/api/backends
 
-# Check Companion logs for spawn errors
-journalctl --user -u vibe-companion.service | grep -i "error\|spawn\|fail"
+# 2. Check CLI binaries
+which claude && claude --version
+which codex && codex --version
+
+# 3. Check spawn errors
+journalctl --user -u vibe-companion.service --no-pager | grep -iE "spawn|ENOENT|not found" | tail -10
 ```
 
-**Common causes**:
+**Fix** (depends on diagnosis):
+```bash
+# Backend shows available:false → CLI not in service PATH
+# Add missing path to service file, then:
+systemctl --user daemon-reload && systemctl --user restart vibe-companion.service
 
-- Claude CLI not installed at the expected path
-- Claude CLI not authenticated (no valid session/token)
-- Missing environment variables (HOME, PATH)
+# CLI not authenticated
+claude auth login   # for Claude Code
+codex login         # for Codex CLI
+```
 
-### 9.6 High Memory Usage
+**Verify**:
+```bash
+curl -s http://localhost:3456/api/backends
+# Expected: {"id":"claude","available":true}, {"id":"codex","available":true}
+```
+
+### 9.6 Codex Backend Shows "available: false"
+
+**Symptom**: Companion only shows Claude Code, Codex option is greyed out or missing.
+
+**Diagnose**:
+```bash
+# 1. Is codex installed?
+which codex && codex --version
+
+# 2. Is codex in service PATH?
+grep "PATH=" ~/.config/systemd/user/vibe-companion.service
+
+# 3. Backend API check
+curl -s http://localhost:3456/api/backends | python3 -m json.tool
+```
+
+**Fix**:
+```bash
+# Install codex if missing
+npm install -g @openai/codex
+
+# Add npm-global to service PATH if missing
+# ~/.config/systemd/user/vibe-companion.service should have:
+# Environment=PATH=/home/YOUR_USER/.npm-global/bin:/home/YOUR_USER/.bun/bin:...
+
+systemctl --user daemon-reload
+systemctl --user restart vibe-companion.service
+```
+
+**Verify**:
+```bash
+curl -s http://localhost:3456/api/backends | grep codex
+# Expected: "available":true
+```
+
+### 9.7 High Memory Usage
 
 **Symptom**: The service consumes several GB of memory.
 
-**Explanation**: Each active Claude Code session spawns multiple child processes (Claude CLI + all configured MCP servers). In the observed configuration, each session creates ~13 child processes. With 3 active sessions, the service was using ~576MB resident + 2GB swap.
+**Diagnose**:
+```bash
+# Check memory usage
+systemctl --user status vibe-companion.service --no-pager | grep Memory
 
-**Solutions**:
+# Count child processes per session
+systemctl --user status vibe-companion.service --no-pager | grep -c "claude\|codex\|node\|python"
 
-- Limit concurrent sessions (close unused ones from the browser UI)
-- Add memory limits to the service file:
-  ```ini
-  MemoryMax=4G
-  MemorySwapMax=2G
-  ```
-- Restart the service periodically to reclaim memory from orphaned processes
+# System-wide memory
+free -h
+```
 
-### 9.7 Service Does Not Start on Boot
+**Fix**:
+```bash
+# Option 1: Close unused sessions from browser UI
+
+# Option 2: Add memory limits to service file
+# Add under [Service]:
+#   MemoryMax=4G
+#   MemorySwapMax=2G
+systemctl --user daemon-reload
+systemctl --user restart vibe-companion.service
+
+# Option 3: Nuclear - restart service (kills all sessions)
+systemctl --user restart vibe-companion.service
+```
+
+**Verify**:
+```bash
+systemctl --user status vibe-companion.service --no-pager | grep Memory
+```
+
+### 9.8 Service Does Not Start on Boot
 
 **Symptom**: After reboot, Companion is not running.
 
-**Checklist**:
-
+**Diagnose**:
 ```bash
-# Is the service enabled?
+# Check service enabled
+systemctl --user is-enabled vibe-companion.service
+
+# Check lingering
+loginctl show-user $(whoami) | grep Linger
+```
+
+**Fix**:
+```bash
+# Enable service (if not)
+systemctl --user enable vibe-companion.service
+
+# Enable lingering (required for boot-start without login)
+loginctl enable-linger $(whoami)
+```
+
+**Verify**:
+```bash
 systemctl --user is-enabled vibe-companion.service
 # Expected: enabled
-
-# Is lingering enabled?
 loginctl show-user $(whoami) | grep Linger
 # Expected: Linger=yes
+```
 
-# If lingering is not enabled:
-loginctl enable-linger $(whoami)
+### 9.9 Updating Companion to Latest Version
+
+**Symptom**: Running an old version, want to update.
+
+**Diagnose**:
+```bash
+# Check current version
+cat /tmp/bunx-$(id -u)-the-vibe-companion@latest/node_modules/the-vibe-companion/package.json 2>/dev/null | grep '"version"'
+
+# Check latest available
+npm view the-vibe-companion version
+```
+
+**Fix**:
+```bash
+# 1. Stop service
+systemctl --user stop vibe-companion.service
+
+# 2. Clear bun cache
+find /tmp/bunx-$(id -u)-the-vibe-companion@latest -delete 2>/dev/null
+
+# 3. Start service (auto-downloads latest)
+systemctl --user start vibe-companion.service
+```
+
+**Verify**:
+```bash
+sleep 5
+cat /tmp/bunx-$(id -u)-the-vibe-companion@latest/node_modules/the-vibe-companion/package.json | grep '"version"'
+curl -s http://localhost:3456/api/backends | python3 -m json.tool
+systemctl --user status vibe-companion.service --no-pager | head -5
 ```
 
 ---
@@ -967,6 +1126,7 @@ Tailscale serve handles WebSocket upgrades transparently. Not all reverse proxie
 | Systemd service | `~/.config/systemd/user/vibe-companion.service` |
 | Bun binary | `~/.bun/bin/bun` |
 | Claude CLI | `~/.local/bin/claude` |
+| Codex CLI | `~/.npm-global/bin/codex` |
 | Companion cache | `/tmp/bunx-$(id -u)-the-vibe-companion@latest/` |
 | Claude Code config | `~/.claude.json` |
 | Claude Code project config | `.claude/` (per project) |
@@ -982,6 +1142,8 @@ Tailscale serve handles WebSocket upgrades transparently. Not all reverse proxie
 | Bun | 1.3.9 |
 | Node.js | v24.13.0 |
 | Claude Code CLI | 2.1.38 |
+| Codex CLI | 0.98.0 |
+| Companion | 0.15.0 |
 | Docker | 29.2.0 |
 | Tailscale | 1.92.5 |
 | Tailscale IP | <your-tailscale-ip> |
@@ -995,8 +1157,11 @@ For developing against or debugging the Companion WebSocket protocol:
 
 ```
 Browser  <--WS-->  Companion Server  <--WS (NDJSON)-->  Claude CLI
+                                     <--stdio (JSON-RPC)-->  Codex CLI
   :3456/ws/browser/<session-id>      :3456/ws/cli/<session-id>
 ```
+
+> **v0.15.0+**: Companion supports two backends: **Claude Code** (WebSocket/NDJSON) and **Codex CLI** (stdio/JSON-RPC via CodexAdapter).
 
 **CLI spawn command** (generated by Companion):
 
