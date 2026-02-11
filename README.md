@@ -1258,6 +1258,51 @@ claude \
 {"type": "result", "status": "success", "usage": {"input_tokens": N, "output_tokens": N}, "cost": 0.XX}
 ```
 
+## Appendix D: Supported & Potential CLI Backends
+
+Companion is designed as a **backend-agnostic web UI** for AI coding agents. Each backend needs a dedicated adapter that translates between the CLI's protocol and Companion's internal message types.
+
+### Currently Supported
+
+| Backend | Since | Protocol | Status |
+|---------|-------|----------|--------|
+| [Claude Code](https://claude.com/claude-code) | v0.1.0 | WebSocket / NDJSON | Native, full support |
+| [OpenAI Codex CLI](https://github.com/openai/codex) | v0.15.0 | stdio / JSON-RPC (`CodexAdapter`) | Full support (see [9.10](#910-codex-session-fails-unknown-variant-unless-trusted) for compatibility note) |
+
+### Potential Future Backends
+
+These CLI tools could potentially be integrated with Companion if adapters are written:
+
+| CLI Tool | Repo | Protocol | Adapter Difficulty | Notes |
+|----------|------|----------|--------------------|-------|
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | google-gemini/gemini-cli | ReAct loop, MCP support | Medium | Open-source, Google-backed. Free tier: 60 req/min, 1000 req/day |
+| [Qwen Code](https://github.com/QwenLM/qwen-code) | QwenLM/qwen-code | Same as Gemini CLI | Low (if Gemini adapter exists) | Fork of Gemini CLI — shares protocol. Qwen3-Coder-Next model |
+| [Mini-Agent](https://github.com/MiniMax-AI/Mini-Agent) | MiniMax-AI/Mini-Agent | Python CLI, stdio | Medium-High | MiniMax-M2.1 model. Different protocol from Codex |
+| [Kilo CLI](https://github.com/kilocode/kilo) | kilocode/kilo | OpenAI-compatible | Medium | Supports 500+ models, open-source |
+| [Aider](https://github.com/paul-gauthier/aider) | paul-gauthier/aider | Custom CLI | High | Popular but very different protocol |
+
+### How Backend Detection Works
+
+Companion checks backend availability at startup via `which <binary>`:
+
+```bash
+# Check which backends Companion detects
+curl -s http://localhost:3456/api/backends | python3 -m json.tool
+```
+
+For a new backend to be detected, it must:
+1. Have its binary in the systemd service's `PATH`
+2. Have a corresponding adapter in `server/` (e.g., `codex-adapter.ts`)
+3. Be registered in `routes.ts` under the `/api/backends` endpoint
+
+### Contributing a New Backend
+
+If you want to add a new CLI backend to Companion:
+1. Study the existing `codex-adapter.ts` (~1100 lines) as a reference
+2. Implement the adapter translating the CLI's protocol to Companion's message types
+3. Handle: streaming, tool calls, approvals, session resume, error recovery
+4. Submit a PR to [The-Vibe-Company/companion](https://github.com/The-Vibe-Company/companion)
+
 ---
 
-*Guide created: 2026-02-10 | Created with Claude Code*
+*Guide created: 2026-02-10 | Updated: 2026-02-11 | Created with Claude Code*
