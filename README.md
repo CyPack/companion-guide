@@ -993,6 +993,51 @@ curl -s http://localhost:3456/api/backends | python3 -m json.tool
 systemctl --user status vibe-companion.service --no-pager | head -5
 ```
 
+### 9.10 Codex Session Fails: "unknown variant `unless-trusted`"
+
+**Symptom**: Creating a Codex session from Companion UI fails immediately with:
+```
+Codex initialization failed: Error: Invalid request: unknown variant `unless-trusted`,
+expected one of `untrusted`, `on-failure`, `on-request`, `never`
+```
+
+**Diagnose**:
+```bash
+# Check Codex CLI version
+codex --version
+
+# Check what Companion sends as approvalPolicy
+grep "unless-trusted" /tmp/bunx-$(id -u)-the-vibe-companion@latest/node_modules/the-vibe-companion/server/codex-adapter.ts
+```
+
+**Root Cause**: Companion v0.15.0's `CodexAdapter` maps Claude Code permission modes to Codex `approvalPolicy` values. It sends `"unless-trusted"` which was valid in older Codex versions but was renamed to `"untrusted"` in Codex CLI 0.98.0+. The valid values are now: `untrusted`, `on-failure`, `on-request`, `never`.
+
+**Fix** (local patch until upstream fixes it):
+```bash
+# Patch the adapter — change "unless-trusted" to "on-failure"
+ADAPTER="/tmp/bunx-$(id -u)-the-vibe-companion@latest/node_modules/the-vibe-companion/server/codex-adapter.ts"
+
+# Find the line
+grep -n "unless-trusted" "$ADAPTER"
+# Expected: line ~1169: return "unless-trusted";
+
+# Apply patch
+sed -i 's/return "unless-trusted"/return "on-failure"/' "$ADAPTER"
+
+# Restart service
+systemctl --user restart vibe-companion.service
+```
+
+**Verify**:
+```bash
+sleep 3
+curl -s http://localhost:3456/api/backends | python3 -m json.tool
+# Expected: codex available: true
+# Then create a Codex session from browser UI — should work now
+```
+
+**Note**: This patch is local and will be overwritten on the next `bunx` update. Check if the upstream has fixed this before updating: `gh api repos/The-Vibe-Company/companion/issues --jq '.[].title' | grep -i codex`
+
 ---
 
 ## 10. Quick Reference
@@ -1113,6 +1158,18 @@ For a production deployment, pinning the version is strongly recommended. `bunx 
 
 This was a deliberate design choice by the Companion project. They expect you to handle access control externally. Tailscale is the ideal solution because it provides identity, encryption, and access control in a single layer without any configuration on the Companion side.
 
+### Codex CLI + Companion: Version Compatibility Matters
+
+Companion v0.15.0 added Codex CLI backend support, but the `CodexAdapter` was written against an older Codex CLI version. When Codex CLI 0.98.0 renamed the `approvalPolicy` enum value from `unless-trusted` to `untrusted`, Companion broke silently. The fix is a one-line patch in `codex-adapter.ts`, but the lesson is: **when using `bunx` (always-latest) for Companion, the Codex CLI version must also be compatible**. Pin versions in production or test after every update.
+
+### `bunx` Cache Lives in /tmp: Patches Are Ephemeral
+
+Local patches to files in `/tmp/bunx-*` work immediately (Bun runs TypeScript directly) but are lost on the next service restart that triggers a fresh download. For persistent patches, either: (1) fork the repo and publish your own package, (2) pin a working version with `bunx the-vibe-companion@0.15.0`, or (3) contribute the fix upstream and wait for a release.
+
+### Service PATH Must Include All CLI Tools
+
+When adding new backends (like Codex), the systemd service PATH must include the directory where the CLI binary lives. Companion uses `which codex` at runtime to detect availability. If the binary exists but isn't in the service's PATH, the backend shows `available: false`. Always verify with `curl localhost:3456/api/backends` after PATH changes.
+
 ### WebSocket Through Reverse Proxies
 
 Tailscale serve handles WebSocket upgrades transparently. Not all reverse proxies do. If you ever need to put Companion behind nginx or Traefik instead of Tailscale serve, you will need explicit WebSocket proxy configuration (`proxy_http_version 1.1`, `Upgrade` headers, etc.).
@@ -1127,6 +1184,8 @@ Tailscale serve handles WebSocket upgrades transparently. Not all reverse proxie
 | Bun binary | `~/.bun/bin/bun` |
 | Claude CLI | `~/.local/bin/claude` |
 | Codex CLI | `~/.npm-global/bin/codex` |
+| Codex CLI config | `~/.codex/config.toml` |
+| Codex adapter (patchable) | `/tmp/bunx-$(id -u)-the-vibe-companion@latest/node_modules/the-vibe-companion/server/codex-adapter.ts` |
 | Companion cache | `/tmp/bunx-$(id -u)-the-vibe-companion@latest/` |
 | Claude Code config | `~/.claude.json` |
 | Claude Code project config | `.claude/` (per project) |
